@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -83,18 +84,28 @@ func mineBlock(block Block, target *big.Int, startNonce, endNonce uint32, result
 	}
 	stats <- hashes
 }
+
 func loadConfig() (*rpcclient.ConnConfig, error) {
 	cfg, err := ini.Load("config.ini")
 	if err != nil {
 		return nil, fmt.Errorf("Failed to read config file: %v", err)
 	}
+
 	return &rpcclient.ConnConfig{
 		Host:         cfg.Section("").Key("host").String(),
-		User:         cfg.Section("").Key("rpcudser").String(),
+		User:         cfg.Section("").Key("rpcuser").String(),
 		Pass:         cfg.Section("").Key("rpcpassword").String(),
 		HTTPPostMode: true,
 		DisableTLS:   true,
 	}, nil
+}
+func setupLogger() (*log.Logger, *os.File, error) {
+	file, err := os.OpenFile("mining.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		return nil, nil, fmt.Errorf("Failed to open log file: %v", err)
+	}
+	logger := log.New(file, "", log.LstdFlags)
+	return logger, file, nil
 }
 
 func main() {
@@ -109,7 +120,13 @@ func main() {
 	}
 	defer client.Shutdown()
 
-	fmt.Println("Connected to Bitcoin Core")
+	logger, logFile, err := setupLogger()
+	if err != nil {
+		log.Fatalf("Error setting up logger: %v", err)
+	}
+	defer logFile.Close()
+
+	logger.Println("Connected to Bitcoin Core")
 
 	// Get block template
 	blockTemplate, err := client.GetBlockTemplate(&btcjson.TemplateRequest{})
