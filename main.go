@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"runtime/trace"
 	"strconv"
 	"sync"
 	"time"
@@ -63,7 +64,7 @@ func calculateMerkleRoot(txns []string) string {
 	return calculateMerkleRoot(newLevel)
 }
 
-func mineBlock(block Block, target *big.Int, startNonce, endNonce uint32, result chan<- Block, stats chan<- int, wg *sync.WaitGroup, mutex *sync.Mutex) {
+func mineBlock(block Block, target *big.Int, startNonce, endNonce uint32, result chan<- Block, stats chan<- int, wg *sync.WaitGroup, mutex *sync.Mutex, logger *log.Logger) {
 	defer wg.Done()
 	var hashInt big.Int
 	hashes := 0
@@ -79,10 +80,12 @@ func mineBlock(block Block, target *big.Int, startNonce, endNonce uint32, result
 			result <- block
 			mutex.Unlock()
 			stats <- hashes
+			logger.Printf("Nonce found: %d, Hash: %s", nonce, hash)
 			return
 		}
 	}
 	stats <- hashes
+	logger.Printf("Checked nonces from %d to %d, total hashes: %d", startNonce, endNonce, hashes)
 }
 
 func loadConfig() (*rpcclient.ConnConfig, error) {
@@ -99,13 +102,28 @@ func loadConfig() (*rpcclient.ConnConfig, error) {
 		DisableTLS:   true,
 	}, nil
 }
+
 func setupLogger() (*log.Logger, *os.File, error) {
 	file, err := os.OpenFile("mining.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		return nil, nil, fmt.Errorf("Failed to open log file: %v", err)
 	}
+
 	logger := log.New(file, "", log.LstdFlags)
 	return logger, file, nil
+}
+
+func setupTrace() (*os.File, error) {
+	traceFile, err := os.Create("trace.out")
+	if err != nil {
+		return nil, fmt.Errorf("Failed to create trace file: %v", err)
+	}
+
+	if err := trace.Start(traceFile); err != nil {
+		return nil, fmt.Errorf("Failed to start trace: %v", err)
+	}
+
+	return traceFile, nil
 }
 
 func main() {
@@ -126,18 +144,27 @@ func main() {
 	}
 	defer logFile.Close()
 
+	traceFile, err := setupTrace()
+	if err != nil {
+		logger.Fatalf("Error setting up trace: %v", err)
+	}
+	defer func() {
+		trace.Stop()
+		traceFile.Close()
+	}()
+
 	logger.Println("Connected to Bitcoin Core")
 
 	// Get block template
 	blockTemplate, err := client.GetBlockTemplate(&btcjson.TemplateRequest{})
 	if err != nil {
-		log.Fatalf("Error getting block template: %v", err)
+		logger.Fatalf("Error getting block template: %v", err)
 	}
 
 	// Convert Bits from string to uint32
 	bits, err := strconv.ParseUint(blockTemplate.Bits, 16, 32)
 	if err != nil {
-		log.Fatalf("Error converting Bits to uint32: %v", err)
+		logger.Fatalf("Error converting Bits to uint32: %v", err)
 	}
 
 	// Calculate the Merkle Root for the transactions
@@ -167,14 +194,14 @@ func main() {
 	nonceRange := uint32(^uint32(0)) / uint32(numGoroutines)
 
 	startTime := time.Now()
-	fmt.Println("Mining...")
+	logger.Println("Mining started...")
 
 	for i := 0; i < numGoroutines; i++ {
 		startNonce := uint32(i) * nonceRange
 		endNonce := startNonce + nonceRange - 1
 
 		wg.Add(1)
-		go mineBlock(block, target, startNonce, endNonce, result, stats, &wg, &mutex)
+		go mineBlock(block, target, startNonce, endNonce, result, stats, &wg, &mutex, logger)
 	}
 
 	go func() {
@@ -191,10 +218,10 @@ func main() {
 		totalHashes += hashCount
 	}
 
-	fmt.Printf("\nBlock mined!\n")
-	fmt.Printf("Hash: %s\n", calculateHash(minedBlock))
-	fmt.Printf("Nonce: %d\n", minedBlock.Nonce)
-	fmt.Printf("Time taken: %s\n", endTime.Sub(startTime))
-	fmt.Printf("Total hashes: %d\n", totalHashes)
-	fmt.Printf("Hashes per second: %f\n", float64(totalHashes)/endTime.Sub(startTime).Seconds())
+	logger.Printf("\nBlock mined!\n")
+	logger.Printf("Hash: %s\n", calculateHash(minedBlock))
+	logger.Printf("Nonce: %d\n", minedBlock.Nonce)
+	logger.Printf("Time taken: %s\n", endTime.Sub(startTime))
+	logger.Printf("Total hashes: %d\n", totalHashes)
+	logger.Printf("Hashes per second: %f\n", float64(totalHashes)/endTime.Sub(startTime).Seconds())
 }
